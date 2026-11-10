@@ -2,6 +2,7 @@
 
 import os
 import sys
+import traceback
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -95,12 +96,13 @@ def test_openrouter_missing_key_raises(dummy_router):
         dummy_router._call_openrouter("Prompt")
 
 
-def test_openrouter_key_not_exposed_in_rate_limit(dummy_router):
+@pytest.mark.parametrize("prefix", ["Rate limit exceeded for key ", "x" * 190])
+def test_openrouter_key_not_exposed_in_rate_limit(dummy_router, prefix):
     """Verify raw key is redacted if present in rate-limit response text."""
     secret = "sk-or-v1-secret-test-token"
     mock_resp = MagicMock()
     mock_resp.status_code = 429
-    mock_resp.text = f"Rate limit exceeded for key {secret} on endpoint"
+    mock_resp.text = f"{prefix}{secret} on endpoint"
 
     with patch("modules.llm_router.requests.post", return_value=mock_resp):
         with pytest.raises(RateLimitError) as exc_info:
@@ -142,6 +144,49 @@ def test_openrouter_key_not_exposed_in_network_error(dummy_router):
         error_message = str(exc_info.value)
         assert secret not in error_message
         assert "[REDACTED]" in error_message
+
+
+def test_openrouter_key_not_exposed_in_json_decode_error(dummy_router):
+    secret = dummy_router._openrouter_key
+    mock_resp = MagicMock(status_code=200)
+    mock_resp.json.side_effect = requests.exceptions.JSONDecodeError(
+        f"Invalid value {secret}", secret, 0
+    )
+
+    with (
+        patch("modules.llm_router.requests.post", return_value=mock_resp),
+        pytest.raises(RuntimeError, match="^OpenRouter returned invalid JSON$") as exc_info,
+    ):
+        dummy_router._call_openrouter("Prompt")
+
+    assert secret not in "".join(traceback.format_exception(exc_info.value))
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        None,
+        {"error": "sk-or-v1-secret-test-token"},
+        {"choices": []},
+        {"choices": [{"message": None}]},
+        {"choices": [{"message": {"content": ["sk-or-v1-secret-test-token"]}}]},
+    ],
+)
+def test_openrouter_key_not_exposed_in_malformed_response(dummy_router, payload):
+    mock_resp = MagicMock(status_code=200)
+    mock_resp.json.return_value = payload
+
+    with (
+        patch("modules.llm_router.requests.post", return_value=mock_resp),
+        pytest.raises(
+            RuntimeError, match="^Unexpected OpenRouter response format$"
+        ) as exc_info,
+    ):
+        dummy_router._call_openrouter("Prompt")
+
+    assert dummy_router._openrouter_key not in "".join(
+        traceback.format_exception(exc_info.value)
+    )
 
 
 def test_openrouter_rotation_on_rate_limit(dummy_router):

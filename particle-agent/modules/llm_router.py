@@ -189,9 +189,7 @@ class LLMRouter:
 
         if resp.status_code == 429:
             self._or_model_idx += 1
-            safe_text = resp.text[:200]
-            if key in safe_text:
-                safe_text = safe_text.replace(key, "[REDACTED]")
+            safe_text = resp.text.replace(key, "[REDACTED]")[:200]
             raise RateLimitError(
                 f"OpenRouter model={model} rate-limited: {safe_text}"
             )
@@ -206,16 +204,17 @@ class LLMRouter:
                 f"OpenRouter HTTP error for model {model}: {err_msg}"
             ) from None
 
-        data = resp.json()
         try:
-            text: str = data["choices"][0]["message"]["content"]
-        except (KeyError, IndexError) as exc:
-            safe_data = str(data)[:400]
-            if key in safe_data:
-                safe_data = safe_data.replace(key, "[REDACTED]")
-            raise RuntimeError(
-                f"Unexpected OpenRouter response format: {safe_data}"
-            ) from exc
+            data = resp.json()
+        except ValueError:
+            raise RuntimeError("OpenRouter returned invalid JSON") from None
+
+        try:
+            text = data["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError):
+            raise RuntimeError("Unexpected OpenRouter response format") from None
+        if not isinstance(text, str):
+            raise RuntimeError("Unexpected OpenRouter response format")
 
         logger.info("OpenRouter model=%s responded (%d chars)", model, len(text))
         self._or_model_idx += 1
